@@ -6,6 +6,7 @@ from typing import Optional, Tuple, List, Any, Dict, Union, Type
 from warnings import warn
 
 import networkx as nx
+import numpy as np
 import pandas as pd
 
 from autogluon.core.models import AbstractModel
@@ -471,7 +472,98 @@ class AbstractTimeSeriesTrainer(SimpleAbstractTrainer):
                     train_data, model=model, val_data=val_data, time_limit=time_left
                 )
 
+        # TODO
+        # TRAIN ENSEMBLE HERE
+        self.fit_ensemble(val_data=val_data, model_names=model_names_trained)
+        # TODO
+
         return model_names_trained
+
+    def _score(self, forecasts, tss, quantile_levels):
+        from gluonts.evaluation import Evaluator
+        from ..utils.warning_filters import evaluator_warning_filter
+        from ..utils.metric_utils import METRIC_COEFFICIENTS
+
+        eval_metric = self.eval_metric
+
+        evaluator = (
+            Evaluator(quantiles=quantile_levels)
+            if quantile_levels is not None
+            else Evaluator()
+        )
+
+        num_series = len(tss)
+        with evaluator_warning_filter():
+            agg_metrics, item_metrics = evaluator(
+                iter(tss), iter(forecasts), num_series=num_series
+            )
+            model_score = agg_metrics[eval_metric] * METRIC_COEFFICIENTS[eval_metric]
+        return model_score
+
+    def _weight_preds(self, model_preds, model_names, weights):
+        from gluonts.model.forecast import SampleForecast
+
+        num_series = len(model_preds[model_names[0]][0])
+        forecasts_ensemble = []
+        for i in range(num_series):
+            samples_weighted_list = []
+            for j, model_name in enumerate(model_names):
+                weight = weights[j]
+                forecasts, _ = model_preds[model_name]
+                forecast = forecasts[i]
+                samples_ensemble = np.multiply(forecast.samples, weight)
+                samples_weighted_list.append(samples_ensemble)
+            samples_ensemble = np.sum(samples_weighted_list, axis=0)
+            forecast_ensemble = SampleForecast(
+                samples=samples_ensemble,
+                start_date=forecast.start_date,
+                freq=forecast.freq,
+                item_id=forecast.item_id
+            )
+            forecasts_ensemble.append(forecast_ensemble)
+        return forecasts_ensemble
+
+    def fit_ensemble(self, val_data, model_names):
+        print('fitting ensemble')
+        model_preds = {}
+        for model_name in model_names:
+            model = self.load_model(model_name=model_name)
+            # predict on val_data
+            model_preds[model_name] = model._predict_for_scoring(val_data)
+
+        tss = model_preds[model_names[0]][1]
+
+        for model_name in model_preds:
+            forecasts, _ = model_preds[model_name]
+            model_score = self._score(forecasts=forecasts, tss=tss, quantile_levels=self.quantile_levels)
+            print(f"{model_name}: {model_score}")
+
+        weights_list = [[n/100, (100-n)/100] for n in range(101)]
+
+        score_outs = []
+        score_out_best = None
+
+        for weights in weights_list:
+            forecasts_ensemble = self._weight_preds(model_preds=model_preds, model_names=model_names, weights=weights)
+            # forecast_ensemble
+            model_score = self._score(forecasts=forecasts_ensemble, tss=tss, quantile_levels=self.quantile_levels)
+            print(f'ENSEMBLE SCORE: {model_score}\tWeights: {weights}')
+
+            if score_out_best is None or score_out_best[0] < model_score:
+                score_out_best = [model_score, weights]
+
+            score_outs.append([model_score, weights])
+        print()
+        for model_score, weights in score_outs:
+            print(f'ENSEMBLE SCORE: {model_score}\tWeights: {weights}')
+        print('-----')
+        print(f'BEST ENSEMBLE SCORE: {score_out_best[0]}\tWeights: {score_out_best[1]}')
+
+        # get optimal weights
+        # score
+        # TODO: Save ensemble
+        # TODO: Make ensemble available in leaderboard
+        # TODO: Make ensemble available in predict
 
     def leaderboard(self, data: Optional[TimeSeriesDataFrame] = None) -> pd.DataFrame:
         logger.log(30, "Generating leaderboard for all models trained...")
