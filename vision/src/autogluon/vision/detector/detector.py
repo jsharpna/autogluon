@@ -9,7 +9,7 @@ import os
 import pandas as pd
 import numpy as np
 from autogluon.common.utils.log_utils import set_logger_verbosity, verbosity2loglevel
-from autogluon.core.utils import get_gpu_count_all
+from autogluon.core.utils import ResourceManager
 from .._gluoncv import ObjectDetection
 from ..configs.presets_configs import unpack, _check_gpu_memory_presets
 
@@ -36,6 +36,12 @@ class ObjectDetector(object):
     Dataset = ObjectDetection.Dataset
 
     def __init__(self, path=None, verbosity=2):
+        warnings.warn(
+            f"AutoGluon ObjectDetector will be deprecated in v0.7. "
+            f"Please use AutoGluon MultiModalPredictor instead for more functionalities and better support. "
+            f"Visit https://auto.gluon.ai/stable/tutorials/multimodal/index.html for more details!",
+            DeprecationWarning,
+        )
         if path is None:
             path = os.getcwd()
         self._log_dir = path
@@ -61,8 +67,8 @@ class ObjectDetector(object):
         is not large, you may disable `CUDNN_AUTOTUNE` by setting the environment variable
         `export MXNET_CUDNN_AUTOTUNE_DEFAULT=0` before running your python script or
         insert `import os; os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = '0'` before any code block.
-        The tuning is beneficial in terms of training speed in the long run, but may cost your noticeble overhead at
-        the begining of each trial.
+        The tuning is beneficial in terms of training speed in the long run, but may cost your noticeable overhead at
+        the beginning of each trial.
 
         Parameters
         ----------
@@ -178,7 +184,7 @@ class ObjectDetector(object):
             early_stop_patience : int, default=10
                 Number of epochs with no improvement after which train is early stopped. Use `None` to disable.
             early_stop_min_delta : float, default=1e-4
-                The small delta value to ignore when evaluating the metric. A large delta helps stablize the early
+                The small delta value to ignore when evaluating the metric. A large delta helps stabilize the early
                 stopping strategy against tiny fluctuation, e.g. 0.5->0.49->0.48->0.499->0.500001 is still considered as
                 a good timing for early stopping.
             early_stop_baseline : float, default=None
@@ -207,7 +213,7 @@ class ObjectDetector(object):
                     Searcher strategy for HPO, 'random' by default.
                     Options include: ‘random’ (random search), ‘grid’ (grid search).
                 max_reward : float, default = None
-                    The reward threashold for stopping criteria. If `max_reward` is reached during HPO, the scheduler
+                    The reward threshold for stopping criteria. If `max_reward` is reached during HPO, the scheduler
                     will terminate earlier to reduce time cost.
                 scheduler_options : dict, default = None
                     Extra options for HPO scheduler, please refer to :class:`autogluon.core.Searcher` for details.
@@ -490,4 +496,4 @@ class ObjectDetector(object):
 
     @staticmethod
     def _get_num_gpus_available():
-        return get_gpu_count_all()
+        return ResourceManager.get_gpu_count_all()

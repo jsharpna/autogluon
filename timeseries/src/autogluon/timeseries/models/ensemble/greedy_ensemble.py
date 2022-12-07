@@ -38,6 +38,8 @@ class TimeSeriesEnsembleSelection(EnsembleSelection):
 
     def _fit(self, predictions, labels, time_limit=None, sample_weight=None):
         self.dummy_pred = copy.deepcopy(predictions[0])
+        # This should never happen; sanity check to make sure that all predictions have the same index
+        assert all(self.dummy_pred.index.equals(pred.index) for pred in predictions)
         super()._fit(
             predictions=[d.values for d in predictions],
             labels=labels,
@@ -49,7 +51,9 @@ class TimeSeriesEnsembleSelection(EnsembleSelection):
     def _calculate_regret(self, y_true, y_pred_proba, metric, dummy_pred=None, sample_weight=None):  # noqa
         dummy_pred = copy.deepcopy(self.dummy_pred if dummy_pred is None else dummy_pred)
         dummy_pred[list(dummy_pred.columns)] = y_pred_proba
-        return metric(y_true, dummy_pred) * metric.coefficient
+        score = metric(y_true, dummy_pred) * metric.coefficient
+        # score: higher is better, regret: lower is better, so we flip the sign
+        return -score
 
 
 class SimpleTimeSeriesWeightedEnsemble(AbstractWeightedEnsemble):
@@ -68,10 +72,17 @@ class SimpleTimeSeriesWeightedEnsemble(AbstractWeightedEnsemble):
         preds: List[TimeSeriesDataFrame],
         weights: List[float],
     ) -> TimeSeriesDataFrame:
-        assert len(set(v.shape for v in preds)) == 1
+        if all(p is None for p in preds):
+            raise RuntimeError("All input models failed during prediction, WeightedEnsemble cannot predict.")
+        assert len(set(p.shape for p in preds if p is not None)) == 1
 
-        # TODO: handle NaNs
-        return sum(p * w for p, w in zip(preds, weights))
+        weights = np.array(weights)
+        for idx, p in enumerate(preds):
+            if p is None:
+                weights[idx] = 0
+        weights = weights / np.sum(weights)
+
+        return sum(p * w for p, w in zip(preds, weights) if p is not None)
 
 
 class TimeSeriesEnsembleWrapper(AbstractTimeSeriesModel):
@@ -103,6 +114,12 @@ class TimeSeriesEnsembleWrapper(AbstractTimeSeriesModel):
             raise ValueError(
                 "Set of models given for prediction in the weighted ensemble differ from those "
                 "provided during initialization."
+            )
+        failed_models = [model_name for (model_name, model_preds) in data.items() if model_preds is None]
+        if len(failed_models) > 0:
+            logger.warning(
+                f"Following models failed during prediction: {failed_models}. "
+                f"{self.name} will set the weight of these models to zero and re-normalize the weights when predicting."
             )
 
         return self.weighted_ensemble.predict([data[k] for k in self.model_names])

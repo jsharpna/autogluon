@@ -67,10 +67,17 @@ class TextPredictor:
         warn_if_exist : bool, default = True
             Whether to raise warning if the specified path already exists.
         """
+        warnings.warn(
+            f"AutoGluon TextPredictor is deprecated in v0.6 and will be removed in v0.7. "
+            f"Please use AutoGluon MultiModalPredictor instead for more functionalities and better support. "
+            f"Visit https://auto.gluon.ai/stable/tutorials/multimodal/index.html for more details!",
+            DeprecationWarning,
+        )
         self.verbosity = verbosity
         if backend == PYTORCH:
             predictor_cls = MultiModalPredictor
         elif backend == MXNET:
+            raise RuntimeError(f"backend='{MXNET}' is no longer supported. You may switch to use backend='{PYTORCH}'")
             from .mx_predictor import MXTextPredictor
             predictor_cls = MXTextPredictor
         else:
@@ -370,7 +377,7 @@ class TextPredictor:
             as_pandas=as_pandas,
         )
 
-    def save(self, path, standalone=False):
+    def save(self, path, standalone=True):
         """
         Save this Predictor to file in directory specified by `path`.
         The relevant files will be saved in two parts:
@@ -386,11 +393,11 @@ class TextPredictor:
         ----------
         path: str
             The path to directory in which to save this Predictor.
-        standalone: bool, default = False
-            Whether to save the downloaded model for offline deployment. 
-            If `standalone = True`, save the transformers.CLIPModel and transformers.AutoModel to os.path.join(path,model_name).
-            Also, see `MultiModalPredictor.save()` for more detials.
-            Note that `standalone = True` only works for `backen = pytorch` and does noting in `backen = mxnet`.
+        standalone: bool, default = True
+            Whether to save the Huggingface's pretrained model config for offline deployment.
+            If `standalone = True`, save the Huggingface's pretrained model config to os.path.join(path, model_name).
+            Also, see `MultiModalPredictor.save()` for more details.
+            Note that `standalone = True` only works for `backend = pytorch` and does noting in `backend = mxnet`.
         """
 
         self._predictor.save(path=path, standalone=standalone)

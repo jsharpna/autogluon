@@ -12,6 +12,8 @@ ag = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ag)
 ###########################
 
+import sys
+
 version = ag.load_version_file()
 version = ag.update_version(version)
 
@@ -33,12 +35,13 @@ extras_require = {
         'lightgbm>=3.3,<3.4',
     ],
     'catboost': [
-        'catboost>=1.0,<1.1',
+        'catboost>=1.0,<1.2',
     ],
     # FIXME: Debug why xgboost 1.6 has 4x+ slower inference on multiclass datasets compared to 1.4
     #  It is possibly only present on MacOS, haven't tested linux.
+    # XGBoost made API breaking changes in 1.6 with custom metric and callback support, so we don't support older versions.
     'xgboost': [
-        'xgboost>=1.4,<1.5',
+        'xgboost>=1.6,<1.8',
     ],
     'fastai': [
         'torch>=1.0,<1.13',
@@ -52,6 +55,14 @@ extras_require = {
     ],
     'vowpalwabbit': [
         'vowpalwabbit>=8.10,<8.11'
+    ],
+    'skl2onnx': [
+        'skl2onnx>=1.12.0,<1.13.0',
+        # For macOS, there isn't a onnxruntime-gpu package installed with skl2onnx.
+        # Therefore, we install onnxruntime explicitly here just for macOS.
+        'onnxruntime>=1.12.0,<1.13.0'
+    ] if sys.platform == 'darwin' else [
+        'skl2onnx>=1.12.0,<1.13.0'
     ]
 }
 
@@ -64,7 +75,7 @@ extras_require['all'] = all_requires
 
 
 test_requires = []
-for test_package in ['imodels', 'vowpalwabbit']:
+for test_package in ['imodels', 'vowpalwabbit', 'skl2onnx']:
     test_requires += extras_require[test_package]
 extras_require['tests'] = test_requires
 install_requires = ag.get_dependency_version_ranges(install_requires)

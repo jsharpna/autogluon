@@ -15,7 +15,7 @@ Yes!
 
 Yes! Most of the models used by AutoGluon support GPU training, including LightGBM, CatBoost, XGBoost, MXNet Neural Network, and FastAI Neural Network.
 
-To enable GPU training, specify in [predictor.fit](../../api/autogluon.predictor.html#autogluon.tabular.TabularPredictor.fit) the argument `ag_args_fit={'num_gpus': 1}`. This will enable GPU training for all models that support it. Multi-GPU training is still experimental.
+To enable GPU training, specify in [predictor.fit](../../api/autogluon.predictor.html#autogluon.tabular.TabularPredictor.fit) the argument `num_gpus=SOME_VALUE`. This will enable GPU training for all models that support it. Multi-GPU training is still experimental.
 
 For most of these models, CUDA will have to be installed and some models may need special installations such as LightGBM and MXNet to be compatible with GPU training. Refer to [installation instructions](../../install.html) for more details.
 
@@ -170,6 +170,13 @@ To solely use custom data preprocessing and automatically apply your custom tran
 
 You can specify the `sample_weight` and `weight_evaluation` [arguments](../../api/autogluon.predictor.html#autogluon.tabular.TabularPredictor) when initializing a `TabularPredictor`.
 
+### How does missing value imputation work in AutoGluon?
+
+AutoGluon does not perform generic missing value imputation, instead it sends the missing values to each model,
+and each model has different custom handling of missing values.
+This improves model diversity and thus the final strength of the ensemble.
+Refer to the model source code to learn how missing values are handled.
+
 ### I'm receiving C++ warning spam during training or inference
 
 ```
@@ -184,9 +191,9 @@ export OMP_NUM_THREADS=1
 ```
 
 ### How to limit the number of cores AutoGluon will use
-Although it is generally recommended to let AutoGluon to use all the cores, you can limit it by setting the `ag_fit_args`:
+Although it is generally recommended to let AutoGluon to use all the cores, you can limit it by setting the `num_cpus`:
 ```
-predictor = TabularPredictor(...).fit(..., ag_fit_args={'num_cpus': NUM_CORES_YOU_WANT})
+predictor = TabularPredictor(...).fit(..., num_cpus = NUM_CORES_YOU_WANT)
 ```
 You can also limit the number of cores used by a specific model:
 ```

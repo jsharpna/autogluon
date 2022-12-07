@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 from pandas import DataFrame, Series
+from typing import List
 from sklearn.metrics import classification_report
 
 from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION, QUANTILE, AUTO_WEIGHT, BALANCE_WEIGHT
@@ -61,6 +62,7 @@ class AbstractTabularLearner(AbstractLearner):
         self.label_cleaner: LabelCleaner = None
         self.feature_generator: PipelineFeatureGenerator = feature_generator
 
+        self._original_features = None
         self._pre_X_rows = None
         self._post_X_rows = None
         self._positive_class = positive_class
@@ -73,6 +75,11 @@ class AbstractTabularLearner(AbstractLearner):
             raise ValueError("Must specify sample_weight column if you specify weight_evaluation=True")
         if groups is not None and not isinstance(groups, str):
             raise ValueError('groups must be a string indicating the name of the column that contains the split groups. If you have a vector of split groups, first add these as an extra column to your data.')
+
+    @property
+    def original_features(self) -> List[str]:
+        """Original features user passed in before autogluon doing any processing"""
+        return self._original_features
 
     # TODO: Possibly rename to features_in or consider refactoring all feature_generators features_in -> features
     @property
@@ -276,7 +283,7 @@ class AbstractTabularLearner(AbstractLearner):
         return compute_weighted_metric(y, y_pred, self.eval_metric, w, weight_evaluation=self.weight_evaluation, quantile_levels=self.quantile_levels)
 
     # Scores both learner and all individual models, along with computing the optimal ensemble score + weights (oracle)
-    def score_debug(self, X: DataFrame, y=None, extra_info=False, compute_oracle=False, extra_metrics=None, silent=False):
+    def score_debug(self, X: DataFrame, y=None, extra_info=False, compute_oracle=False, extra_metrics=None, skip_score=False, silent=False):
         leaderboard_df = self.leaderboard(extra_info=extra_info, silent=silent)
         if y is None:
             X, y = self.extract_label(X)
@@ -296,7 +303,7 @@ class AbstractTabularLearner(AbstractLearner):
         all_trained_models = trainer.get_model_names()
         all_trained_models_can_infer = trainer.get_model_names(can_infer=True)
         all_trained_models_original = all_trained_models.copy()
-        model_pred_proba_dict, pred_time_test_marginal = trainer.get_model_pred_proba_dict(X=X, models=all_trained_models_can_infer, fit=False, record_pred_time=True)
+        model_pred_proba_dict, pred_time_test_marginal = trainer.get_model_pred_proba_dict(X=X, models=all_trained_models_can_infer, record_pred_time=True)
 
         if compute_oracle:
             pred_probas = list(model_pred_proba_dict.values())
@@ -320,11 +327,14 @@ class AbstractTabularLearner(AbstractLearner):
 
         extra_scores = {}
         for model_name, y_pred_proba_internal in model_pred_proba_dict.items():
-            scores[model_name] = self._score_with_pred_proba(
-                y_pred_proba_internal=y_pred_proba_internal,
-                metric=self.eval_metric,
-                **scoring_args
-            )
+            if skip_score:
+                scores[model_name] = None
+            else:
+                scores[model_name] = self._score_with_pred_proba(
+                    y_pred_proba_internal=y_pred_proba_internal,
+                    metric=self.eval_metric,
+                    **scoring_args
+                )
             for metric in extra_metrics:
                 metric = get_metric(metric, self.problem_type, 'leaderboard_metric')
                 if metric.name not in extra_scores:
@@ -577,19 +587,12 @@ class AbstractTabularLearner(AbstractLearner):
                     )
                 performance_dict[aux_metric.name] = score
 
-        if self.eval_metric.name in performance_dict:
-            score_eval = performance_dict[self.eval_metric.name]
-            score_eval_flipped = self.eval_metric.convert_score_to_sklearn_val(score_eval)  # flip negative once again back to positive (so higher is no longer necessarily better)
-            if score_eval_flipped != score_eval:
-                flipped = True
-            else:
-                flipped = False
-            if not silent:
-                logger.log(20, f"Evaluation: {self.eval_metric.name} on test data: {score_eval}")
-                if flipped:
-                    logger.log(20, f"\tNote: Scores are always higher_is_better. This metric score can be multiplied by -1 to get the metric value.")
-
         if not silent:
+            if self.eval_metric.name in performance_dict:
+                score_eval = performance_dict[self.eval_metric.name]
+                logger.log(20, f"Evaluation: {self.eval_metric.name} on test data: {score_eval}")
+                if not self.eval_metric.greater_is_better_internal:
+                    logger.log(20, f"\tNote: Scores are always higher_is_better. This metric score can be multiplied by -1 to get the metric value.")
             logger.log(20, "Evaluations on test data:")
             logger.log(20, json.dumps(performance_dict, indent=4))
 
@@ -619,9 +622,9 @@ class AbstractTabularLearner(AbstractLearner):
         X = X.drop(self.label, axis=1)
         return X, y
 
-    def leaderboard(self, X=None, y=None, extra_info=False, extra_metrics=None, only_pareto_frontier=False, silent=False):
+    def leaderboard(self, X=None, y=None, extra_info=False, extra_metrics=None, only_pareto_frontier=False, skip_score=False, silent=False):
         if X is not None:
-            leaderboard = self.score_debug(X=X, y=y, extra_info=extra_info, extra_metrics=extra_metrics, silent=True)
+            leaderboard = self.score_debug(X=X, y=y, extra_info=extra_info, extra_metrics=extra_metrics, skip_score=skip_score, silent=True)
         else:
             if extra_metrics:
                 raise AssertionError('`extra_metrics` is only valid when data is specified.')

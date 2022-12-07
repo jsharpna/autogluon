@@ -1,6 +1,7 @@
 import logging
 import math
 import pickle
+import os
 import sys
 import time
 
@@ -15,6 +16,9 @@ from autogluon.core.utils.utils import normalize_pred_probas
 from autogluon.core.models import AbstractModel
 from autogluon.features.generators import LabelEncoderFeatureGenerator
 
+from .compilers.native import RFNativeCompiler
+from .compilers.onnx import RFOnnxCompiler
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +30,7 @@ class RFModel(AbstractModel):
         super().__init__(**kwargs)
         self._feature_generator = None
         self._daal = False  # Whether daal4py backend is being used
+        self._num_features_post_process = None
 
     def _get_model_type(self):
         if self.problem_type == QUANTILE:
@@ -173,7 +178,7 @@ class RFModel(AbstractModel):
         if self._daal:
             if params.get('warm_start', False):
                 params['warm_start'] = False
-            # FIXME: This is inefficent but sklearnex doesn't support computing oob_score after training
+            # FIXME: This is inefficient but sklearnex doesn't support computing oob_score after training
             params['oob_score'] = True
 
         model = model_cls(**params)
@@ -358,3 +363,9 @@ class RFModel(AbstractModel):
         else:
             tags['valid_oof'] = True
         return tags
+
+    def _valid_compilers(self):
+        return [RFNativeCompiler, RFOnnxCompiler]
+
+    def _default_compiler(self):
+        return RFNativeCompiler

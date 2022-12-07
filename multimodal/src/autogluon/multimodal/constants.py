@@ -4,45 +4,66 @@ CATEGORICAL = "categorical"
 TEXT = "text"
 NUMERICAL = "numerical"
 IMAGE_PATH = "image_path"
+IDENTIFIER = "identifier"
 
 # Problem types
 CLASSIFICATION = "classification"
 BINARY = "binary"
 MULTICLASS = "multiclass"
 REGRESSION = "regression"
+FEW_SHOT = "few_shot"
+FEW_SHOT_TEXT_CLASSIFICATION = "few_shot_text_classification"
+DEFAULT_SHOT = "default_shot"
 DEPRECATED_ZERO_SHOT = "zero_shot"
+NER = "ner"
+NAMED_ENTITY_RECOGNITION = "named_entity_recognition"
 
 # Pipelines
 FEATURE_EXTRACTION = "feature_extraction"
 ZERO_SHOT_IMAGE_CLASSIFICATION = "zero_shot_image_classification"
 OBJECT_DETECTION = "object_detection"
+OCR = "ocr"
+OCR_TEXT_DETECTION = f"{OCR}_text_detection"
+OCR_TEXT_RECOGNITION = f"{OCR}_text_recognition"
+IMAGE_SIMILARITY = "image_similarity"
+TEXT_SIMILARITY = "text_similarity"
+IMAGE_TEXT_SIMILARITY = "image_text_similarity"
 
 # Input keys
 IMAGE = "image"
 IMAGE_VALID_NUM = "image_valid_num"
 LABEL = "label"
 TEXT_TOKEN_IDS = "text_token_ids"
+CHOICES_IDS = "choices_ids"
 TEXT_VALID_LENGTH = "text_valid_length"
 TEXT_SEGMENT_IDS = "text_segment_ids"
 COLUMN = "column"
 
 # Output keys
 LOGITS = "logits"
+TEMPLATE_LOGITS = "template_logits"
+LM_TARGET = "lm_target"
 LOSS = "loss"
 OUTPUT = "output"
 WEIGHT = "weight"
 FEATURES = "features"
+RAW_FEATURES = "raw_features"
 MASKS = "masks"
 PROBABILITY = "probability"
 COLUMN_FEATURES = "column_features"
 BBOX = "bbox"
-
+ROIS = "rois"
+SCORE = "score"
+LOGIT_SCALE = "logit_scale"
 
 # Metric
+MAP = "map"
+MEAN_AVERAGE_PRECISION = "mean_average_precision"
 MAX = "max"
 MIN = "min"
 ACCURACY = "accuracy"
 ACC = "acc"
+OVERALL_ACCURACY = "overall_accuracy"
 RMSE = "rmse"
 ROOT_MEAN_SQUARED_ERROR = "root_mean_squared_error"
 R2 = "r2"
@@ -55,9 +76,16 @@ LOG_LOSS = "log_loss"
 CROSS_ENTROPY = "cross_entropy"
 COSINE_EMBEDDING_LOSS = "cosine_embedding_loss"
 F1 = "f1"
+DIRECT_LOSS = "direct_loss"
+HIT_RATE = "hit_rate"
+NDCG = "ndcg"
+PRECISION = "precision"
+RECALL = "recall"
+MRR = "mrr"
 METRIC_MODE_MAP = {
     ACC: MAX,
     ACCURACY: MAX,
+    DIRECT_LOSS: MIN,
     RMSE: MIN,
     ROOT_MEAN_SQUARED_ERROR: MIN,
     R2: MAX,
@@ -68,12 +96,20 @@ METRIC_MODE_MAP = {
     PEARSONR: MAX,
     SPEARMANR: MAX,
     F1: MAX,
+    MAP: MAX,
+    MEAN_AVERAGE_PRECISION: MAX,
+    OVERALL_ACCURACY: MAX,
+    HIT_RATE: MAX,
+    NDCG: MAX,
+    PRECISION: MAX,
+    RECALL: MAX,
+    MRR: MAX,
 }
 VALID_METRICS = METRIC_MODE_MAP.keys()
 
 # Training status
 TRAIN = "train"
-VAL = "val"
+VALIDATE = "validate"
 TEST = "test"
 PREDICT = "predict"
 
@@ -81,6 +117,7 @@ PREDICT = "predict"
 HUGGINGFACE = "huggingface"
 TIMM = "timm"
 MMDET = "mmdet"
+MMOCR = "mmocr"
 
 # Modality keys. may need to update here if new modality keys are added in above.
 ALL_MODALITIES = [IMAGE, TEXT, CATEGORICAL, NUMERICAL]
@@ -123,26 +160,59 @@ BIT_FIT = "bit_fit"
 LORA = "lora"
 LORA_BIAS = "lora_bias"
 LORA_NORM = "lora_norm"
+IA3 = "ia3"
+IA3_BIAS = "ia3_bias"
+IA3_NORM = "ia3_norm"
+IA3_LORA = "ia3_lora"
+IA3_LORA_BIAS = "ia3_lora_bias"
+IA3_LORA_NORM = "Ia3_lora_norm"
+PEFT_STRATEGIES = [
+    BIT_FIT,
+    NORM_FIT,
+    LORA,
+    LORA_BIAS,
+    LORA_NORM,
+    IA3,
+    IA3_BIAS,
+    IA3_NORM,
+    IA3_LORA,
+    IA3_LORA_BIAS,
+    IA3_LORA_NORM,
+]
+
+# DeepSpeed constants
+DEEPSPEED_OFFLOADING = "deepspeed_stage_3_offload"
+DEEPSPEED_STRATEGY = "deepspeed"
+DEEPSPEED_MODULE = "autogluon.multimodal.optimization.deepspeed"
+DEEPSPEED_MIN_PL_VERSION = "1.7.1"
 
 # registered model keys. TODO: document how to add new models.
 CLIP = "clip"
 TIMM_IMAGE = "timm_image"
 HF_TEXT = "hf_text"
+T_FEW = "t_few"
 NUMERICAL_MLP = "numerical_mlp"
 CATEGORICAL_MLP = "categorical_mlp"
 NUMERICAL_TRANSFORMER = "numerical_transformer"
 CATEGORICAL_TRANSFORMER = "categorical_transformer"
-FUSION_MLP = "fusion_mlp"
-FUSION_TRANSFORMER = "fusion_transformer"
+FUSION = "fusion"
+FUSION_MLP = f"{FUSION}_mlp"
+FUSION_TRANSFORMER = f"{FUSION}_transformer"
 MMDET_IMAGE = "mmdet_image"
+MMOCR_TEXT_DET = "mmocr_text_detection"
+MMOCR_TEXT_RECOG = "mmocr_text_recognition"
+NER_TEXT = "ner_text"
+HF_MODELS = (HF_TEXT, T_FEW, CLIP, NER_TEXT)
+MMLAB_MODELS = (MMDET_IMAGE, MMOCR_TEXT_DET, MMOCR_TEXT_RECOG)
 
-# metric learning loss type
+# matcher loss type
 CONTRASTIVE_LOSS = "contrastive_loss"
+MULTI_NEGATIVES_SOFTMAX_LOSS = "multi_negatives_softmax_loss"
 
-# metric learning distance type
+# matcher distance type
 COSINE_SIMILARITY = "cosine_similarity"
 
-# metric learning miner type
+# matcher miner type
 PAIR_MARGIN_MINER = "pair_margin_miner"
 
 # checkpoints
@@ -153,3 +223,21 @@ MODEL_CHECKPOINT = "model.ckpt"
 
 # url
 S3_PREFIX = "s3://"
+SOURCEPROMPT_URL = "https://automl-mm-bench.s3.amazonaws.com/few_shot/templates.zip"
+SOURCEPROMPT_SHA1 = "c25cdf3730ff96ab4859b72e18d46ff117b62bd6"
+
+# ner
+ENTITY_GROUP = "entity_group"
+START_OFFSET = "start"
+END_OFFSET = "end"
+TOKEN_WORD_MAPPING = "token_word_mapping"
+WORD_OFFSETS = "word_offsets"
+NER_RET = "ner_ret"
+NER_ANNOTATION = "ner_annotation"
+
+# matcher
+QUERY = "query"
+RESPONSE = "response"
+QUERY_RESPONSE = f"{QUERY}_{RESPONSE}"
+PAIR = "pair"
+TRIPLET = "triplet"

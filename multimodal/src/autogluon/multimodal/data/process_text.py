@@ -3,16 +3,29 @@ import logging
 import os
 import warnings
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 from nptyping import NDArray
+from omegaconf import DictConfig
+from torch import nn
 from transformers import AutoConfig, AutoTokenizer, BertTokenizer, CLIPTokenizer, ElectraTokenizer
 
-from ..constants import AUTOMM, COLUMN, TEXT, TEXT_SEGMENT_IDS, TEXT_TOKEN_IDS, TEXT_VALID_LENGTH
+from ..constants import (
+    AUTOMM,
+    CHOICES_IDS,
+    COLUMN,
+    TEXT,
+    TEXT_SEGMENT_IDS,
+    TEXT_TOKEN_IDS,
+    TEXT_VALID_LENGTH,
+    TOKEN_WORD_MAPPING,
+    WORD_OFFSETS,
+)
 from .collator import Pad, Stack
+from .template_engine import TemplateEngine
 from .trivial_augmenter import TrivialAugment
-from .utils import extract_value_from_config
+from .utils import extract_value_from_config, normalize_txt, register_encoding_decoding_error_handlers
 
 logger = logging.getLogger(AUTOMM)
 
@@ -75,8 +88,7 @@ class TextProcessor:
 
     def __init__(
         self,
-        prefix: str,
-        checkpoint_name: str,
+        model: nn.Module,
         tokenizer_name: Optional[str] = "hf_auto",
         max_len: Optional[int] = None,
         insert_sep: Optional[bool] = True,
@@ -86,6 +98,8 @@ class TextProcessor:
         text_detection_length: Optional[int] = None,
         text_trivial_aug_maxscale: Optional[float] = 0.0,
         train_augment_types: Optional[List[str]] = None,
+        template_config: Optional[DictConfig] = None,
+        normalize_text: Optional[bool] = False,
     ):
         """
         Parameters
@@ -109,20 +123,27 @@ class TextProcessor:
         text_detection_length
             A naive way to detect text column versus tabular column that were treated as text
         text_trivial_aug_maxscale
-            Used in trival augment as the maximum scale that can be random generated
+            Used in trivial augment as the maximum scale that can be random generated
             A value of 0 means turn off trivial augment
             https://arxiv.org/pdf/2103.10158.pdf
         train_augment_types
             All possible augmentation operations
+        normalize_text
+            Whether to normalize text to resolve encoding problems.
+            Examples of normalized texts can be found at
+            https://github.com/awslabs/autogluon/tree/master/examples/automm/kaggle_feedback_prize#15-a-few-examples-of-normalized-texts
         """
-        self.prefix = prefix
+        self.prefix = model.prefix
         self.tokenizer_name = tokenizer_name
-        self.checkpoint_name = checkpoint_name
         self.requires_column_info = requires_column_info
-        self.tokenizer = self.get_pretrained_tokenizer(
-            tokenizer_name=tokenizer_name,
-            checkpoint_name=checkpoint_name,
-        )
+        # Use the model's tokenizer if it exists.
+        if hasattr(model, "tokenizer"):
+            self.tokenizer = model.tokenizer
+        else:
+            self.tokenizer = self.get_pretrained_tokenizer(
+                tokenizer_name=tokenizer_name,
+                checkpoint_name=model.checkpoint_name,
+            )
         if hasattr(self.tokenizer, "deprecation_warnings"):
             # Disable the warning "Token indices sequence length is longer than the specified maximum sequence..."
             # See https://github.com/huggingface/transformers/blob/6ac77534bfe97c00e0127bb4fc846ae0faf1c9c5/src/transformers/tokenization_utils_base.py#L3362
@@ -133,18 +154,19 @@ class TextProcessor:
             self.max_len = self.tokenizer.model_max_length
         else:
             if max_len < self.tokenizer.model_max_length:
-                warnings.warn(
-                    f"provided max length: {max_len} "
-                    f"is smaller than {checkpoint_name}'s default: {self.tokenizer.model_max_length}"
-                )
+                # TODO, Consider to fix the logic
+                if self.tokenizer.model_max_length < 10**6:
+                    warnings.warn(
+                        f"provided max length: {max_len} "
+                        f"is smaller than {model.checkpoint_name}'s default: {self.tokenizer.model_max_length}"
+                    )
             self.max_len = min(max_len, self.tokenizer.model_max_length)
         logger.debug(f"text max length: {self.max_len}")
 
         self.insert_sep = insert_sep
         self.eos_only = self.cls_token_id == self.sep_token_id == self.eos_token_id
 
-        config = AutoConfig.from_pretrained(checkpoint_name).to_diff_dict()
-        extracted = extract_value_from_config(config=config, keys=("type_vocab_size",))
+        extracted = extract_value_from_config(config=model.config.to_diff_dict(), keys=("type_vocab_size",))
         if len(extracted) == 0:
             default_segment_num = 1
         elif len(extracted) == 1:
@@ -158,19 +180,25 @@ class TextProcessor:
         if text_segment_num < default_segment_num:
             warnings.warn(
                 f"provided text_segment_num: {text_segment_num} "
-                f"is smaller than {checkpoint_name}'s default: {default_segment_num}"
+                f"is smaller than {model.checkpoint_name}'s default: {default_segment_num}"
             )
         self.text_segment_num = min(text_segment_num, default_segment_num)
         assert self.text_segment_num >= 1
         logger.debug(f"text segment num: {self.text_segment_num}")
 
         self.stochastic_chunk = stochastic_chunk
+        self.normalize_text = normalize_text
 
         # construct augmentor
         self.train_augment_types = train_augment_types
         self.text_detection_length = text_detection_length
         self.text_trivial_aug_maxscale = text_trivial_aug_maxscale
         self.train_augmenter = construct_text_augmenter(self.text_trivial_aug_maxscale, self.train_augment_types)
+        self.template_config = template_config
+        self.template_engine = TemplateEngine(self.template_config)
+
+        if self.normalize_text:
+            register_encoding_decoding_error_handlers()
 
     @property
     def text_token_ids_key(self):
@@ -179,6 +207,10 @@ class TextProcessor:
     @property
     def text_segment_ids_key(self):
         return f"{self.prefix}_{TEXT_SEGMENT_IDS}"
+
+    @property
+    def choices_ids_key(self):
+        return f"{self.prefix}_{CHOICES_IDS}"
 
     @property
     def text_valid_length_key(self):
@@ -208,6 +240,7 @@ class TextProcessor:
                 self.text_token_ids_key: Pad(pad_val=self.tokenizer.pad_token_id),
                 self.text_valid_length_key: Stack(),
                 self.text_segment_ids_key: Pad(pad_val=0),
+                self.choices_ids_key: Pad(pad_val=0),
             }
         )
 
@@ -252,9 +285,15 @@ class TextProcessor:
             token_ids = []
         else:
             token_ids = [self.cls_token_id]
+
+        choices_ids = []
         segment_ids = [seg]
         ret = {}
+
         for (col_name, txt_token), trim_length in zip(text_tokens.items(), trimmed_lengths):
+            if col_name == CHOICES_IDS:
+                choices_ids = txt_token
+                continue
             segment_start = len(token_ids)
             if self.stochastic_chunk:
                 start_ptr = np.random.randint(0, len(txt_token) - trim_length + 1)
@@ -285,6 +324,7 @@ class TextProcessor:
                 self.text_token_ids_key: np.array(token_ids, dtype=np.int32),
                 self.text_valid_length_key: len(token_ids),
                 self.text_segment_ids_key: np.array(segment_ids, dtype=np.int32),
+                self.choices_ids_key: np.array(choices_ids, dtype=np.int32),
             }
         )
 
@@ -315,13 +355,28 @@ class TextProcessor:
         tokens = {}
         warnings.filterwarnings("ignore", "Token indices sequence length is longer than.*result in indexing errors")
 
+        if self.template_config.turn_on:
+            template, applied_template = self.template_engine.sample_and_apply_template(text)
+            if template:
+                answer_choices = template.get_answer_choices_list(text)
+                text = {}
+                text[TEXT_TOKEN_IDS] = applied_template[0]
+                text[CHOICES_IDS] = answer_choices
+
         for col_name, col_text in text.items():
             if is_training:
                 if self.train_augmenter is not None:
                     # naive way to detect categorical/numerical text:
                     if len(col_text.split(" ")) >= self.text_detection_length:
                         col_text = self.train_augmenter(col_text)
-
+            if col_name == CHOICES_IDS:
+                answer_ids = self.tokenizer(
+                    col_text,
+                    padding="max_length",
+                    max_length=self.template_engine.get_max_choice_length(self.tokenizer),
+                )["input_ids"]
+                tokens[col_name] = answer_ids
+                continue
             col_tokens = self.tokenizer.encode(
                 col_text,
                 add_special_tokens=False,
@@ -438,8 +493,8 @@ class TextProcessor:
 
     def __call__(
         self,
-        all_text: Dict[str, List[str]],
-        idx: int,
+        texts: Dict[str, str],
+        feature_modalities: Dict[str, Union[int, float, list]],
         is_training: bool,
     ) -> Dict:
         """
@@ -447,10 +502,10 @@ class TextProcessor:
 
         Parameters
         ----------
-        all_text
-            All the raw text data in a dataset.
-        idx
-            The sample index in a dataset.
+        texts
+            Texts of one sample.
+        feature_modalities
+            The modality of the feature columns.
         is_training
             Whether to do processing in the training mode.
 
@@ -458,10 +513,10 @@ class TextProcessor:
         -------
         A dictionary containing one sample's text tokens, valid length, and segment ids.
         """
-        per_sample_text = {
-            per_column_name: per_column_text[idx] for per_column_name, per_column_text in all_text.items()
-        }
-        return self.build_one_token_sequence_from_text(per_sample_text, is_training)
+        if self.normalize_text:
+            texts = {col_name: normalize_txt(col_text) for col_name, col_text in texts.items()}
+
+        return self.build_one_token_sequence_from_text(texts, is_training)
 
     def __deepcopy__(self, memo):
         cls = self.__class__
@@ -471,7 +526,7 @@ class TextProcessor:
         for k, v in self.__dict__.items():
             if k != "train_augmenter":
                 setattr(result, k, deepcopy(v, memo))
-        # manual recontruct augmenter
+        # manual reconstruct augmenter
         result.train_augmenter = construct_text_augmenter(result.text_trivial_aug_maxscale, result.train_augment_types)
         return result
 

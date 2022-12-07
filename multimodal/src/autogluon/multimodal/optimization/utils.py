@@ -1,14 +1,17 @@
 import functools
 import logging
+import re
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torchmetrics
 from omegaconf import DictConfig, OmegaConf
 from pytorch_metric_learning import distances, losses, miners
 from torch import nn, optim
 from torch.nn import functional as F
+from transformers import Adafactor
 from transformers.trainer_pt_utils import get_parameter_names
 
 from ..constants import (
@@ -23,16 +26,30 @@ from ..constants import (
     COSINE_EMBEDDING_LOSS,
     COSINE_SIMILARITY,
     CROSS_ENTROPY,
+    DIRECT_LOSS,
     F1,
     FEATURES,
+    HIT_RATE,
+    IA3,
+    IA3_BIAS,
+    IA3_LORA,
+    IA3_LORA_BIAS,
+    IA3_LORA_NORM,
+    IA3_NORM,
     LOG_LOSS,
     LORA,
     LORA_BIAS,
     LORA_NORM,
+    MAP,
+    MULTI_NEGATIVES_SOFTMAX_LOSS,
     MULTICLASS,
+    NER,
     NORM_FIT,
+    OBJECT_DETECTION,
+    OVERALL_ACCURACY,
     PAIR_MARGIN_MINER,
     PEARSONR,
+    PEFT_STRATEGIES,
     QUADRATIC_KAPPA,
     R2,
     REGRESSION,
@@ -41,12 +58,13 @@ from ..constants import (
     ROOT_MEAN_SQUARED_ERROR,
     SPEARMANR,
 )
+from ..utils import MeanAveragePrecision
+from .losses import MultiNegativesSoftmaxLoss, SoftTargetCrossEntropy
 from .lr_scheduler import (
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
     get_polynomial_decay_schedule_with_warmup,
 )
-from .soft_target_crossentropy import SoftTargetCrossEntropy
 
 logger = logging.getLogger(AUTOMM)
 
@@ -85,6 +103,12 @@ def get_loss_func(
                 loss_func = nn.MSELoss()
         else:
             loss_func = nn.MSELoss()
+    elif problem_type == NER:
+        loss_func = nn.CrossEntropyLoss(ignore_index=0)
+    elif problem_type == OBJECT_DETECTION:
+        return None
+    elif problem_type is None:
+        return None
     else:
         raise NotImplementedError
 
@@ -133,6 +157,79 @@ class CustomF1Score(torchmetrics.F1Score):
         return f1_score
 
 
+class CustomHitRate(torchmetrics.Metric):
+    """
+    Compute the hit rate when doing semantic search between two group of embeddings.
+    We assume that (a_i, p_i) are a positive pair and (a_i, p_j) for i!=j a negative pair.
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.add_state("query_embeddings", default=[], dist_reduce_fx=None)
+        self.add_state("response_embeddings", default=[], dist_reduce_fx=None)
+        self.add_state("logit_scale", default=[], dist_reduce_fx=None)
+
+    def update(
+        self,
+        batch_query_embeds: torch.Tensor,
+        batch_response_embeds: torch.Tensor,
+        logit_scale: Optional[torch.Tensor] = None,
+    ):
+        self.query_embeddings.append(batch_query_embeds)
+        self.response_embeddings.append(batch_response_embeds)
+        if logit_scale is not None:
+            self.logit_scale.append(logit_scale)
+
+    def compute(self):
+        query_embeddings = torch.cat(self.query_embeddings)
+        response_embeddings = torch.cat(self.response_embeddings)
+        if self.logit_scale:
+            logit_scale = torch.mean(torch.stack(self.logit_scale))
+        else:
+            logit_scale = 1
+
+        return compute_hit_rate(query_embeddings, response_embeddings, logit_scale)
+
+
+def compute_hit_rate(features_a, features_b, logit_scale, top_ks=[1, 5, 10]):
+    """
+    Compute symmetric hit rates between two groups of features.
+
+    Parameters
+    ----------
+    features_a
+        One group of features.
+    features_b
+        The other group of features.
+    logit_scale
+        The scale of logit (Used in CLIP).
+    top_ks
+        Consider only the top k elements for each query.
+
+    Returns
+    -------
+    The accumulated hit rate.
+    """
+    assert len(features_a) == len(features_b)
+    hit_rate = 0
+    logits_per_a = (logit_scale * features_a @ features_b.t()).detach().cpu()
+    logits_per_b = logits_per_a.t().detach().cpu()
+
+    logits = {"logits_per_a": logits_per_a, "logits_per_b": logits_per_b}
+    ground_truth = torch.arange(len(features_b)).view(-1, 1)
+
+    for name, logit in logits.items():
+        ranking = torch.argsort(logit, descending=True)
+        preds = torch.where(ranking == ground_truth)[1]
+
+        for k in top_ks:
+            hit_rate += (preds < k).float().mean()
+
+    return hit_rate
+
+
 def get_metric(
     metric_name: str,
     num_classes: Optional[int] = None,
@@ -159,7 +256,7 @@ def get_metric(
         A customized metric function.
     """
     metric_name = metric_name.lower()
-    if metric_name in [ACC, ACCURACY]:
+    if metric_name in [ACC, ACCURACY, OVERALL_ACCURACY]:
         return torchmetrics.Accuracy(), None
     elif metric_name in [RMSE, ROOT_MEAN_SQUARED_ERROR]:
         return torchmetrics.MeanSquaredError(squared=False), None
@@ -184,6 +281,18 @@ def get_metric(
         return torchmetrics.SpearmanCorrCoef(), None
     elif metric_name == F1:
         return CustomF1Score(num_classes=num_classes, pos_label=pos_label), None
+    elif metric_name == MAP.lower():
+        return (
+            MeanAveragePrecision(box_format="xyxy", iou_type="bbox", class_metrics=False),
+            None,
+        )  # TODO: remove parameter hardcodings here, and add class_metrics
+    elif metric_name == DIRECT_LOSS:
+        return (
+            torchmetrics.MeanMetric(nan_strategy="warn"),
+            None,
+        )  # This only works for detection where custom_metric is not required for BaseAggregator
+    elif metric_name == HIT_RATE:
+        return CustomHitRate(), None
     else:
         raise ValueError(f"Unknown metric {metric_name}")
 
@@ -241,6 +350,15 @@ def get_optimizer(
             lr=lr,
             weight_decay=weight_decay,
             momentum=momentum,
+        )
+    elif optim_type == "adafactor":
+        optimizer = Adafactor(
+            optimizer_grouped_parameters,
+            lr=lr,
+            weight_decay=weight_decay,
+            scale_parameter=True,  # Generally recommended to enable scaling
+            relative_step=False,
+            warmup_init=False,
         )
     else:
         raise ValueError(f"unknown optimizer: {optim_type}")
@@ -321,7 +439,16 @@ def get_weight_decay_param_names(model: nn.Module):
         model,
         [nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.GroupNorm],
     )
-    decay_param_names = [name for name in decay_param_names if "bias" not in name]
+    decay_param_names = [
+        name
+        for name in decay_param_names
+        if (
+            "bias" not in name
+            and "cls_token" not in name
+            and "categorical_feature_tokenizer" not in name
+            and "numerical_feature_tokenizer" not in name
+        )
+    ]
     return decay_param_names
 
 
@@ -469,12 +596,59 @@ def apply_two_stages_lr(
     return optimizer_grouped_parameters
 
 
+def get_trainable_params_efficient_finetune(
+    norm_param_names: List[str],
+    efficient_finetune: Optional[str] = None,
+):
+    """
+     Get the list of trainable parameters according to the provided efficient finetuning method.
+
+    Parameters
+    ----------
+    norm_param_names
+        The parameters associated with the normalization layers
+    efficient_finetune
+        Efficient finetuning strategy. Trainable parameters will be adjusted according to the method.
+    trainable_param_names
+        Initial specification of layers that should be trained.
+
+    Returns
+    -------
+    Get list of trainable parameter names according to the provided efficient finetuning method.
+    """
+    trainable_param_names = []
+
+    if efficient_finetune == BIT_FIT:
+        trainable_param_names.append(".*bias*.")
+    elif efficient_finetune == NORM_FIT:
+        trainable_param_names.append(".*bias*.")
+        trainable_param_names += norm_param_names
+    elif efficient_finetune in [LORA, IA3, IA3_LORA]:
+        trainable_param_names.append(".*lora_*.")
+    elif efficient_finetune in [LORA_BIAS, IA3_BIAS, IA3_LORA_BIAS]:
+        trainable_param_names.append(".*lora_*.")
+        trainable_param_names.append(".*bias*.")
+    elif efficient_finetune in [LORA_NORM, IA3_NORM, IA3_LORA_NORM]:
+        trainable_param_names.append(".*lora_*.")
+        trainable_param_names.append(".*bias*.")
+        trainable_param_names += norm_param_names
+    elif efficient_finetune is not None and efficient_finetune != "None":
+        raise NotImplementedError(
+            f"The efficient finetuning strategy '{efficient_finetune}'"
+            f" is not supported. We only support"
+            f" {', '.join(PEFT_STRATEGIES)}."
+        )
+
+    return trainable_param_names
+
+
 def apply_layerwise_lr_decay(
     model: nn.Module,
     lr: float,
     lr_decay: float,
     weight_decay: float,
     efficient_finetune: Optional[str] = None,
+    trainable_param_names: Optional[List] = None,
 ):
     """
     Assign monotonically decreasing learning rates for layers from the output end to the input end.
@@ -495,7 +669,7 @@ def apply_layerwise_lr_decay(
     weight_decay
         Weight decay.
     efficient_finetune
-        Efficient finetuning strategy. Can be "bit_fit", "norm_fit". It will only finetune part of the parameters
+        Efficient finetuning strategy. It will only finetune part of the parameters
 
     Returns
     -------
@@ -504,48 +678,18 @@ def apply_layerwise_lr_decay(
     parameter_group_names = {}
     parameter_group_vars = {}
     decay_param_names = get_weight_decay_param_names(model)
-    norm_param_names = get_norm_layer_param_names(model)
-    # Patterns that detect if the layer is a custom layer (not loaded from a pretraining network)
-    # TODO(?) Currently it is a workaround. We need to fix it in the future, i.e., supporting tabular encoders
-    automm_custom_layer_patterns = ["head", "fusion_mlp", "adapter"]
 
     for name, param in model.named_parameters():
-        within_automm_custom_layer = False
-        name_split = name.split(".")
-        for ele_name in name_split[:3]:
-            for pattern in automm_custom_layer_patterns:
-                if pattern in ele_name:
-                    within_automm_custom_layer = True
-                    break
-        if within_automm_custom_layer:
+        layer_id = model.name_to_id[name]
+        if layer_id == 0:  # Set top layer (e.g. head, fusion_mlp, adapter) as being trainable.
             param.requires_grad = True
-        else:
-            if efficient_finetune == BIT_FIT:
-                # For bit_fit, we disable tuning everything except the bias terms
-                if "bias" not in name:
-                    param.requires_grad = False
-            elif efficient_finetune == NORM_FIT:
-                # For norm-fit, we finetune all the normalization layers and bias layers
-                if name not in norm_param_names and "bias" not in name:
-                    param.requires_grad = False
-            elif efficient_finetune == LORA:
-                # For LoRA adaptation we only fine-tune LoRA weights
-                if "lora_" not in name:
-                    param.requires_grad = False
-            elif efficient_finetune == LORA_BIAS:
-                # For LoRA adapation we fine-tune LoRA and all bias weights
-                if "lora_" not in name and "bias" not in name:
-                    param.requires_grad = False
-            elif efficient_finetune == LORA_NORM:
-                # For LoRA adapation we fine-tune LoRA and normalization and bias layers
-                if "lora_" not in name and name not in norm_param_names and "bias" not in name:
-                    param.requires_grad = False
-            elif efficient_finetune is not None and efficient_finetune != "None":
-                raise NotImplementedError(
-                    f"The efficient finetuning strategy '{efficient_finetune}'"
-                    f" is not supported. We only support"
-                    f" '{BIT_FIT}', '{NORM_FIT}', '{LORA}', '{LORA_NORM}', '{LORA_BIAS}'."
-                )
+        elif (
+            efficient_finetune is not None
+            and efficient_finetune != "None"
+            and trainable_param_names
+            and not any([re.match(trainable_param_name, name) for trainable_param_name in trainable_param_names])
+        ):
+            param.requires_grad = False
 
         if not param.requires_grad:
             continue  # frozen weights
@@ -663,67 +807,125 @@ def get_metric_learning_distance_func(
         raise ValueError(f"Unknown distance measure: {name}")
 
 
-def get_metric_learning_loss_funcs(
-    matches: List[DictConfig],
+def infer_matcher_loss(data_format: str, problem_type: str):
+    """
+    Infer the loss type to train the matcher.
+
+    Parameters
+    ----------
+    data_format
+        The training data format, e.g., pair or triplet.
+    problem_type
+        Type of problem.
+
+    Returns
+    -------
+    The loss name.
+    """
+    if data_format == "pair":
+        if problem_type is None:
+            return [MULTI_NEGATIVES_SOFTMAX_LOSS]
+        elif problem_type == BINARY:
+            return [CONTRASTIVE_LOSS]
+        elif problem_type == REGRESSION:
+            return ["cosine_similarity_loss"]
+        else:
+            raise ValueError(f"Unsupported data format {data_format} with problem type {problem_type}")
+    elif data_format == "triplet":
+        if problem_type is None:
+            return [MULTI_NEGATIVES_SOFTMAX_LOSS]
+        else:
+            raise ValueError(f"Unsupported data format {data_format} with problem type {problem_type}")
+    else:
+        raise ValueError(f"Unsupported data format: {data_format}")
+
+
+def get_matcher_loss_func(
+    data_format: str,
+    problem_type: str,
+    loss_type: Optional[str] = None,
+    pos_margin: Optional[float] = None,
+    neg_margin: Optional[float] = None,
+    distance_type: Optional[str] = None,
 ):
     """
     Return a list of pytorch metric learning's loss functions based on their names.
 
     Parameters
     ----------
-    matches
-        A list of matches from the matcher config.
+    data_format
+        The training data format, e.g., pair or triplet.
+    problem_type
+        Type of problem.
+    loss_type
+        The provided loss type.
+    pos_margin
+        The positive margin in computing the metric learning loss.
+    neg_margin
+        The negative margin in computing the metric learning loss.
+    distance_type
+        The distance function type.
 
     Returns
     -------
-    A list of loss functions from the pytorch metric learning package.
+    A loss function of metric learning.
     """
-    metric_learning_loss_funcs = []
-    for per_match in matches:
-        if per_match.loss.type.lower() == CONTRASTIVE_LOSS:
-            metric_learning_loss_funcs.append(
-                losses.ContrastiveLoss(
-                    pos_margin=per_match.loss.pos_margin,
-                    neg_margin=per_match.loss.neg_margin,
-                    distance=get_metric_learning_distance_func(per_match.distance.type),
-                )
-            )
-        else:
-            raise ValueError(f"Unknown metric learning loss: {per_match.loss.type}")
 
-    return metric_learning_loss_funcs
+    allowable_loss_types = infer_matcher_loss(data_format=data_format, problem_type=problem_type)
+    if loss_type is not None:
+        assert loss_type in allowable_loss_types, f"data format {data_format} can't use loss {loss_type}."
+    else:
+        loss_type = allowable_loss_types[0]
+
+    if loss_type.lower() == CONTRASTIVE_LOSS:
+        return losses.ContrastiveLoss(
+            pos_margin=pos_margin,
+            neg_margin=neg_margin,
+            distance=get_metric_learning_distance_func(distance_type),
+        )
+    elif loss_type.lower() == MULTI_NEGATIVES_SOFTMAX_LOSS:
+        return MultiNegativesSoftmaxLoss(
+            local_loss=True,
+            gather_with_grad=True,
+            cache_labels=False,
+        )
+    else:
+        raise ValueError(f"Unknown metric learning loss: {loss_type}")
 
 
-def get_metric_learning_miner_funcs(
-    matches: List[DictConfig],
+def get_matcher_miner_func(
+    miner_type: str,
+    pos_margin: float,
+    neg_margin: float,
+    distance_type: str,
 ):
     """
-    Return a list of pytorch metric learning's miner functions based on their names.
+    Return a pytorch metric learning's miner functions based on their names.
     The miners are used to mine the positive and negative examples.
 
     Parameters
     ----------
-    matches
-        A list of matches from the matcher config.
+    miner_type
+        The miner function type.
+    pos_margin
+        The positive margin used by the miner function.
+    neg_margin
+        The negative margin used by the miner function.
+    distance_type
+        The distance function type.
 
     Returns
     -------
-    A list of miner functions from the pytorch metric learning package.
+    A miner function to mine positive and negative samples.
     """
-    metric_learning_miner_funcs = []
-    for per_match in matches:
-        if per_match.miner.type.lower() == PAIR_MARGIN_MINER:
-            metric_learning_miner_funcs.append(
-                miners.PairMarginMiner(
-                    pos_margin=per_match.miner.pos_margin,
-                    neg_margin=per_match.miner.neg_margin,
-                    distance=get_metric_learning_distance_func(per_match.distance.type),
-                )
-            )
-        else:
-            raise ValueError(f"Unknown metric learning miner: {per_match.miner.type}")
-
-    return metric_learning_miner_funcs
+    if miner_type.lower() == PAIR_MARGIN_MINER:
+        return miners.PairMarginMiner(
+            pos_margin=pos_margin,
+            neg_margin=neg_margin,
+            distance=get_metric_learning_distance_func(distance_type),
+        )
+    else:
+        raise ValueError(f"Unknown metric learning miner: {miner_type}")
 
 
 def generate_metric_learning_labels(

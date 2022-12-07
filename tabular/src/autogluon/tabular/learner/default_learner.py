@@ -63,6 +63,8 @@ class DefaultLearner(AbstractTabularLearner):
         logger.log(20, f'AutoGluon Version:  {self.version}')
         logger.log(20, f'Python Version:     {self._python_version}')
         logger.log(20, f'Operating System:   {platform.system()}')
+        logger.log(20, f'Platform Machine:   {platform.machine()}')
+        logger.log(20, f'Platform Version:   {platform.version()}')
         logger.log(20, f'Train Data Rows:    {len(X)}')
         logger.log(20, f'Train Data Columns: {len([column for column in X.columns if column != self.label])}')
         if X_val is not None:
@@ -165,11 +167,12 @@ class DefaultLearner(AbstractTabularLearner):
         X = copy.deepcopy(X)
 
         # Remove all examples with missing labels from this dataset:
-        missinglabel_inds = [index for index, x in X[self.label].isna().iteritems() if x]
+        missinglabel_inds = list(X[X[self.label].isna()].index)
         if len(missinglabel_inds) > 0:
             logger.warning(f"Warning: Ignoring {len(missinglabel_inds)} (out of {len(X)}) training examples for which the label value in column '{self.label}' is missing")
             X = X.drop(missinglabel_inds, axis=0)
 
+        holdout_frac_og = holdout_frac
         if X_val is not None and self.label in X_val.columns:
             holdout_frac = 1
 
@@ -198,12 +201,27 @@ class DefaultLearner(AbstractTabularLearner):
             logger.log(20, f'Train Data Class Count: {self.label_cleaner.num_classes}')
 
         if X_val is not None and self.label in X_val.columns:
+            y_val_og = X_val[self.label]
             X_val = self.cleaner.transform(X_val)
             if len(X_val) == 0:
-                logger.warning('All X_val data contained low frequency classes, ignoring X_val and generating from subset of X')
+                logger.warning('############################################################################################################\n'
+                               'WARNING: All X_val data contained low frequency classes, ignoring X_val and generating from subset of X\n'
+                               '\tYour input validation data or training data labels might be corrupted, please manually inspect them for correctness!')
+                if self.problem_type in [BINARY, MULTICLASS]:
+                    train_classes = sorted(list(y_uncleaned.unique()))
+                    val_classes = sorted(list(y_val_og.unique()))
+                    logger.warning(f'\tTraining Classes: {train_classes}')
+                    logger.warning(f'\tTuning   Classes: {val_classes}')
+                    logger.warning(f'\tTraining Class Dtype: {y_uncleaned.dtype}')
+                    logger.warning(f'\tTuning   Class Dtype: {y_val_og.dtype}')
+                    missing_classes = [c for c in val_classes if c not in train_classes]
+                    logger.warning(f'\tClasses missing from Training Data: {missing_classes}')
+                logger.warning('############################################################################################################')
+
                 X_val = None
                 y_val = None
                 w_val = None
+                holdout_frac = holdout_frac_og
             else:
                 X_val, y_val = self.extract_label(X_val)
                 y_val = self.label_cleaner.transform(y_val)
@@ -213,6 +231,7 @@ class DefaultLearner(AbstractTabularLearner):
             y_val = None
             w_val = None
 
+        self._original_features = list(X.columns)
         # TODO: Move this up to top of data before removing data, this way our feature generator is better
         logger.log(20, f'Using Feature Generators to preprocess the data ...')
         if X_val is not None:
